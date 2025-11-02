@@ -1,0 +1,292 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Channel {
+  SMS
+  WHATSAPP
+  EMAIL
+  TWITTER
+  FACEBOOK
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum UserRole {
+  ADMIN
+  AGENT
+  VIEWER
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String?   // For credentials auth
+  image         String?   // For OAuth providers
+  role          UserRole  @default(AGENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  teamMemberships     TeamMember[]
+  messages            Message[]
+  sessions            Session[]
+  accounts            Account[]
+  createdNoteThreads  NoteThread[]     @relation("NoteCreator")
+  updatedNoteThreads  NoteThread[]     @relation("NoteUpdater")
+  noteMentions        NoteMention[]
+  scheduledMessages   ScheduledMessage[] @relation("ScheduledMessageCreator")
+
+  @@map("users")
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  members       TeamMember[]
+  contacts      Contact[]
+  twilioNumbers TwilioNumber[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  id     String @id @default(cuid())
+  userId String
+  teamId String
+  role   UserRole @default(AGENT)
+
+  // Relations
+  user User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, teamId])
+  @@map("team_members")
+}
+
+model Contact {
+  id          String   @id @default(cuid())
+  phoneNumber String?  // E.164 format for SMS/WhatsApp
+  email       String?
+  name        String?
+  notes       String?
+  teamId      String?
+  // Social media handles
+  twitterHandle String?
+  facebookId    String?
+  // Additional metadata
+  tags         String[] // Array of tags
+  metadata     Json?    // Additional flexible data
+  status       String?  @default("active") // active, archived, etc.
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  team      Team?       @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  messages  Message[]
+  noteThreads NoteThread[]
+  scheduledMessages ScheduledMessage[]
+
+  @@index([phoneNumber])
+  @@index([email])
+  @@index([twitterHandle])
+  @@index([facebookId])
+  @@index([teamId])
+  @@map("contacts")
+}
+
+model Message {
+  id          String          @id @default(cuid())
+  channel     Channel
+  direction   MessageDirection
+  body        String          @db.Text
+  externalId  String?         @unique // Twilio Message SID or other provider ID
+  status      String?         // e.g., "delivered", "failed", "read", "sent"
+  metadata    Json?           // Additional provider-specific data
+  mediaUrls   String[]        // Array of media URLs for MMS/WhatsApp
+  contactId   String
+  userId      String?         // Assigned agent/user (for outbound) or last viewed
+  isRead      Boolean         @default(false)
+  readAt      DateTime?
+  scheduledFor DateTime?      // For scheduled messages
+  sentAt      DateTime?       // Actual send time
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // Relations
+  contact      Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user         User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messageEvents MessageEvent[]
+
+  @@index([contactId, createdAt])
+  @@index([externalId])
+  @@index([channel, direction])
+  @@index([isRead])
+  @@index([scheduledFor])
+  @@index([status])
+  @@map("messages")
+}
+
+// Better Auth models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  providerId        String
+  providerAccountId String
+  accessToken       String? @db.Text
+  refreshToken      String? @db.Text
+  expiresAt         DateTime?
+  scope             String?
+  password          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+  @@map("verifications")
+}
+
+// Internal Notes with collaboration support
+model NoteThread {
+  id        String   @id @default(cuid())
+  contactId String
+  title     String?
+  content   String   @db.Text
+  isPrivate Boolean  @default(false)
+  createdBy String
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  creator User    @relation("NoteCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+  updater User?   @relation("NoteUpdater", fields: [updatedBy], references: [id], onDelete: SetNull)
+  mentions NoteMention[]
+
+  @@index([contactId])
+  @@index([createdBy])
+  @@map("note_threads")
+}
+
+model NoteMention {
+  id           String   @id @default(cuid())
+  noteThreadId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  noteThread NoteThread @relation(fields: [noteThreadId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([noteThreadId, userId])
+  @@map("note_mentions")
+}
+
+// Scheduled Messages
+model ScheduledMessage {
+  id          String    @id @default(cuid())
+  contactId   String
+  channel     Channel
+  body        String    @db.Text
+  mediaUrls   String[]
+  scheduledFor DateTime
+  status      String    @default("pending") // pending, sent, cancelled, failed
+  createdBy   String
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  creator User    @relation("ScheduledMessageCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([scheduledFor])
+  @@index([status])
+  @@index([contactId])
+  @@map("scheduled_messages")
+}
+
+// Analytics/Engagement Metrics
+model MessageEvent {
+  id          String   @id @default(cuid())
+  messageId   String
+  eventType   String   // delivered, opened, clicked, replied, etc.
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("message_events")
+}
+
+// Twilio Number Management
+model TwilioNumber {
+  id          String   @id @default(cuid())
+  phoneNumber String   @unique // E.164 format
+  friendlyName String?
+  capabilities Json?   // SMS, Voice, WhatsApp, etc.
+  teamId      String?
+  isActive    Boolean  @default(true)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team Team? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
+  @@map("twilio_numbers")
+}
+
